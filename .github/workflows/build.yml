@@ -30,24 +30,19 @@ jobs:
           pyinstaller --noconfirm --clean GhostDrive.spec
           pyinstaller --noconfirm --clean GhostDriveAgents.spec
 
-      - name: Compress Windows Artifacts
+      - name: Compress
         run: |
-          New-Item -ItemType Directory -Force -Path Windows
-          Copy-Item -Recurse -Force dist/GhostDrive/* Windows/
-          Compress-Archive -Path Windows -DestinationPath Windows.zip
-
-          New-Item -ItemType Directory -Force -Path Windows-Agents
-          Copy-Item -Recurse -Force dist/GhostDriveAgents/* Windows-Agents/
-          Compress-Archive -Path Windows-Agents -DestinationPath Windows-Agents.zip
+          Compress-Archive -Path dist/GhostDrive -DestinationPath GhostDrive-Windows.zip
+          Compress-Archive -Path dist/GhostDriveAgents -DestinationPath GhostDriveAgents-Windows.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Windows
-          path: Windows.zip
+          name: GhostDrive-Windows
+          path: GhostDrive-Windows.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: Windows-Agents
-          path: Windows-Agents.zip
+          name: GhostDriveAgents-Windows
+          path: GhostDriveAgents-Windows.zip
 
   build-mac:
     runs-on: macos-latest
@@ -60,9 +55,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip cache purge
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           
-          # Force source compilation to bypass wheel CRC corruption errors on Mac
+          # Compile llama-cpp-python from source on Mac to entirely bypass wheel zip/CRC corruption errors
           pip install --no-cache-dir --no-binary=llama-cpp-python llama-cpp-python
           
           pip install -r requirements.txt
@@ -73,24 +69,19 @@ jobs:
           pyinstaller --noconfirm --clean GhostDrive.spec
           pyinstaller --noconfirm --clean GhostDriveAgents.spec
 
-      - name: Compress Mac Artifacts
+      - name: Compress
         run: |
-          mkdir -p Mac
-          cp -R dist/GhostDrive.app Mac/
-          zip -r Mac.zip Mac
-
-          mkdir -p Mac-Agents
-          cp -R dist/GhostDriveAgents.app Mac-Agents/
-          zip -r Mac-Agents.zip Mac-Agents
+          zip -r GhostDrive-macOS.zip dist/GhostDrive.app
+          zip -r GhostDriveAgents-macOS.zip dist/GhostDriveAgents.app
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Mac
-          path: Mac.zip
+          name: GhostDrive-macOS
+          path: GhostDrive-macOS.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: Mac-Agents
-          path: Mac-Agents.zip
+          name: GhostDriveAgents-macOS
+          path: GhostDriveAgents-macOS.zip
 
   build-linux:
     runs-on: ubuntu-latest
@@ -104,7 +95,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
           pip install -r requirements.txt
           pip install pyinstaller
 
@@ -113,21 +103,16 @@ jobs:
           pyinstaller --noconfirm --clean GhostDrive.spec
           pyinstaller --noconfirm --clean GhostDriveAgents.spec
 
-      - name: Compress Linux Artifacts
+      - name: Compress
         run: |
-          mkdir -p Linux
-          cp -r dist/GhostDrive/* Linux/
-          tar -czvf Linux.tar.gz Linux
-
-          mkdir -p Linux-Agents
-          cp -r dist/GhostDriveAgents/* Linux-Agents/
-          tar -czvf Linux-Agents.tar.gz Linux-Agents
+          tar -czvf GhostDrive-Linux.tar.gz -C dist GhostDrive
+          tar -czvf GhostDriveAgents-Linux.tar.gz -C dist GhostDriveAgents
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Linux
-          path: Linux.tar.gz
+          name: GhostDrive-Linux
+          path: GhostDrive-Linux.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: Linux-Agents
-          path: Linux-Agents.tar.gz
+          name: GhostDriveAgents-Linux
+          path: GhostDriveAgents-Linux.tar.gz
