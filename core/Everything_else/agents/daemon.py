@@ -510,8 +510,8 @@ class MultiAgentDaemonHUD(QWidget):
 
 
     def _background_scheduler_loop(self):
-        """Runs continuously in the background, executing every 15 minutes cleanly between 10:15 PM and 4:00 AM."""
-        logging.info("[Proactive Daemon] Background scheduling thread started with 10:15 PM - 4:00 AM 15-minute cadence.")
+        """Runs continuously in the background, utilizing delta time for reliable 15-minute testing pings between 9 PM and 4 AM."""
+        logging.info("[Proactive Daemon] Background scheduling thread started with delta-time 15-minute testing mode.")
         
         # Ensure shared database exists for multi-agent coordination
         shared_db_path = Path.home() / ".ghostdrive" / "shared_agent_state.db"
@@ -532,14 +532,36 @@ class MultiAgentDaemonHUD(QWidget):
         
         _init_shared_db()
 
+        def _check_and_claim_notification(date_key: str, notif_type: str, agent_id: str) -> bool:
+            """Returns True if this agent successfully claims the notification slot, False if already sent by another agent."""
+            with sqlite3.connect(shared_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT agent_id FROM daily_notifications 
+                    WHERE date_key = ? AND notification_type = ?
+                """, (date_key, notif_type))
+                row = cursor.fetchone()
+                if row:
+                    return False  # Already sent by another agent
+                
+                cursor.execute("""
+                    INSERT OR IGNORE INTO daily_notifications (date_key, notification_type, agent_id)
+                    VALUES (?, ?, ?)
+                """, (date_key, notif_type, agent_id))
+                conn.commit()
+                return True
+
+        # Track delta time for the 15-minute testing window (trigger immediately on start)
+        next_workshop_time = 0.0 
         briefing_hours = {8: "morning_briefing", 16: "closing_bell"}
 
         while True:
             try:
                 now = datetime.now()
                 current_hour = now.hour
-                current_minute = now.minute
+                current_timestamp = time.time()
                 date_str = now.strftime('%Y-%m-%d')
+                current_hour_key = f"{date_str}_{current_hour}"
                 
                 # --- 1. CHECK FOR DYNAMIC DATABASE PINGS ---
                 db_path = Path.home() / ".ghostdrive" / "scheduled_pings.db"
@@ -569,7 +591,9 @@ class MultiAgentDaemonHUD(QWidget):
                                         with self.execution_lock:
                                             chat_id = g.default_chat_id or g.get_fallback_chat_id()
                                             if not chat_id:
-                                                return
+                                                chat_id = g.db.get_last_active_chat_id()
+                                                if not chat_id:
+                                                    return
                                             
                                             model_filename = cfg.get("model_filename") or cfg.get("model_path")
                                             system_prompt = cfg.get("system_prompt", "")
@@ -590,39 +614,26 @@ class MultiAgentDaemonHUD(QWidget):
                     except Exception as db_err:
                         logging.error(f"[Dynamic Ping Error] Failed checking scheduled_pings.db: {db_err}")
 
-                # --- 2. 10:15 PM TO 4:00 AM 15-MINUTE TESTING WINDOW ---
-                # Total minutes from midnight: 10:15 PM = 1425 mins, 4:00 AM = 240 mins
-                total_mins = current_hour * 60 + current_minute
-                is_testing_window = (total_mins >= 1425) or (total_mins < 240)
+                # --- 2. ACCELERATED 15-MIN TESTING WINDOW (9 PM to 4 AM) ---
+                is_testing_window = (current_hour >= 21 or current_hour < 4)
 
                 if is_testing_window:
-                    # Calculate clean 15-min block offset starting from 10:15 PM (1425 mins)
-                    adjusted_mins = total_mins if total_mins >= 1425 else total_mins + 1440
-                    block_index = (adjusted_mins - 1425) // 15
-                    pulse_key = f"{date_str}_15m_block_{block_index}"
-
-                    if getattr(self, "_last_pulse_key", None) != pulse_key:
-                        self._last_pulse_key = pulse_key
-                        logging.info(f"[Autonomous Workshop] Testing Window Trigger -> Pulse Block: {pulse_key}")
-
+                    if current_timestamp >= next_workshop_time:
+                        logging.info(f"[Autonomous Workshop] 15-minute testing interval reached at {now.strftime('%H:%M:%S')}. Triggering workshop...")
+                        
                         for agent_id, config in self.agent_configs.items():
                             gateway = self.gateways.get(agent_id)
                             if not gateway:
                                 continue
 
-                            def _run_workshop(g=gateway, cfg=config, a_id=agent_id):
-                                logging.info(f"[Workshop Worker] Starting thread for agent '{a_id}'...")
+                            def _run_workshop(g=gateway, cfg=config):
                                 with self.execution_lock:
                                     chat_id = g.default_chat_id or g.get_fallback_chat_id()
                                     if not chat_id:
-                                        # Fallback to last active chat ID in DB if default_chat_id is uninitialized
                                         chat_id = g.db.get_last_active_chat_id()
-                                    
-                                    if not chat_id:
-                                        logging.warning(f"[Workshop Worker] Skipped: No chat_id found. Send a message to your Telegram bot first!")
-                                        return
+                                        if not chat_id:
+                                            return
 
-                                    logging.info(f"[Workshop Worker] Resolved chat #{chat_id}. Loading model & running pipeline...")
                                     history = g.db.get_recent_history(chat_id=chat_id, limit=6)
                                     profile = cfg.get("user_profile", {})
                                     active_projects = cfg.get("active_projects", [])
@@ -630,7 +641,136 @@ class MultiAgentDaemonHUD(QWidget):
                                     system_prompt = cfg.get("system_prompt", "")
                                     allowed_tools = cfg.get("allowed_tools", [])
 
-                                    try:
+                                    response = self.tool_runner.process_autonomous_workshop(
+                                        chat_history=history,
+                                        user_profile=profile,
+                                        active_projects=active_projects,
+                                        model_filename=model_filename,
+                                        system_prompt=system_prompt,
+                                        allowed_tools=allowed_tools
+                                    )
+
+                                    if response:
+                                        g.send_proactive_message(response, chat_id=chat_id)
+
+                            threading.Thread(target=_run_workshop, daemon=True).start()
+
+                        # Reset timer for exactly 15 minutes (900 seconds from now)
+                        next_workshop_time = current_timestamp + 900
+
+                else:
+                    # Reset timer so that the moment 9 PM hits again tomorrow, it fires immediately
+                    next_workshop_time = 0.0
+
+                    # --- 3. STANDARD HOURLY BRIEFINGS & WORKSHOPS OUTSIDE TESTING WINDOW ---
+                    if getattr(self, "_last_pulse_key", None) != current_hour_key:
+                        self._last_pulse_key = current_hour_key
+
+                        # A. STRUCTURED BRIEFINGS (8 AM & 4 PM)
+                        if current_hour in briefing_hours:
+                            briefing_type = briefing_hours[current_hour]
+                            logging.info(f"[Briefing Engine] Evaluating {briefing_type} for hour block: {current_hour}:00")
+
+                            briefing_claimed = False
+                            for agent_id, config in self.agent_configs.items():
+                                gateway = self.gateways.get(agent_id)
+                                if not gateway:
+                                    continue
+
+                                if not briefing_claimed and _check_and_claim_notification(date_str, briefing_type, agent_id):
+                                    briefing_claimed = True
+                                    logging.info(f"[Briefing Engine] Agent '{agent_id}' claimed {briefing_type}. Dispatching...")
+
+                                    def _run_briefing(g=gateway, cfg=config, b_type=briefing_type):
+                                        with self.execution_lock:
+                                            chat_id = g.default_chat_id or g.get_fallback_chat_id()
+                                            if not chat_id:
+                                                chat_id = g.db.get_last_active_chat_id()
+                                                if not chat_id:
+                                                    return
+
+                                            model_filename = cfg.get("model_filename") or cfg.get("model_path")
+                                            system_prompt = cfg.get("system_prompt", "")
+                                            allowed_tools = cfg.get("allowed_tools", [])
+
+                                            prompt = (
+                                                "Generate a comprehensive Morning Briefing for the user. "
+                                                "Use available market and web tools to pull recent stock trends, market outlook for the day, "
+                                                "and curated top headlines across business, politics, and sports."
+                                            ) if b_type == "morning_briefing" else (
+                                                "Generate a Closing Bell Afternoon Briefing for the user. "
+                                                "Use available market and web tools to summarize today's stock performance (top gainers/losers) "
+                                                "alongside focused business and financial news articles."
+                                            )
+
+                                            responses = self.tool_runner.process_task(
+                                                prompt=prompt,
+                                                model_filename=model_filename,
+                                                system_prompt=system_prompt,
+                                                allowed_tools=allowed_tools
+                                            )
+
+                                            if responses:
+                                                for resp in responses:
+                                                    g.send_message(chat_id, resp)
+
+                                    threading.Thread(target=_run_briefing, daemon=True).start()
+                                else:
+                                    logging.info(f"[Briefing Engine] Briefing already claimed. Defaulting agent '{agent_id}' to autonomous workshop ping.")
+                                    
+                                    def _run_fallback_workshop(g=gateway, cfg=config):
+                                        with self.execution_lock:
+                                            chat_id = g.default_chat_id or g.get_fallback_chat_id()
+                                            if not chat_id:
+                                                chat_id = g.db.get_last_active_chat_id()
+                                                if not chat_id:
+                                                    return
+
+                                            history = g.db.get_recent_history(chat_id=chat_id, limit=6)
+                                            profile = cfg.get("user_profile", {})
+                                            active_projects = cfg.get("active_projects", [])
+                                            model_filename = cfg.get("model_filename") or cfg.get("model_path")
+                                            system_prompt = cfg.get("system_prompt", "")
+                                            allowed_tools = cfg.get("allowed_tools", [])
+
+                                            response = self.tool_runner.process_autonomous_workshop(
+                                                chat_history=history,
+                                                user_profile=profile,
+                                                active_projects=active_projects,
+                                                model_filename=model_filename,
+                                                system_prompt=system_prompt,
+                                                allowed_tools=allowed_tools
+                                            )
+
+                                            if response:
+                                                g.send_proactive_message(response, chat_id=chat_id)
+
+                                    threading.Thread(target=_run_fallback_workshop, daemon=True).start()
+
+                        # B. STANDARD WORKSHOPS (12 PM & 8 PM)
+                        elif current_hour in {12, 20}:
+                            logging.info(f"[Autonomous Workshop] Triggering standard background grind for hour block: {current_hour}:00")
+
+                            for agent_id, config in self.agent_configs.items():
+                                gateway = self.gateways.get(agent_id)
+                                if not gateway:
+                                    continue
+
+                                def _run_workshop(g=gateway, cfg=config):
+                                    with self.execution_lock:
+                                        chat_id = g.default_chat_id or g.get_fallback_chat_id()
+                                        if not chat_id:
+                                            chat_id = g.db.get_last_active_chat_id()
+                                            if not chat_id:
+                                                return
+
+                                        history = g.db.get_recent_history(chat_id=chat_id, limit=6)
+                                        profile = cfg.get("user_profile", {})
+                                        active_projects = cfg.get("active_projects", [])
+                                        model_filename = cfg.get("model_filename") or cfg.get("model_path")
+                                        system_prompt = cfg.get("system_prompt", "")
+                                        allowed_tools = cfg.get("allowed_tools", [])
+
                                         response = self.tool_runner.process_autonomous_workshop(
                                             chat_history=history,
                                             user_profile=profile,
@@ -641,29 +781,9 @@ class MultiAgentDaemonHUD(QWidget):
                                         )
 
                                         if response:
-                                            logging.info(f"[Workshop Worker] Success! Dispatching proactive message to chat #{chat_id}")
                                             g.send_proactive_message(response, chat_id=chat_id)
-                                        else:
-                                            logging.warning(f"[Workshop Worker] Pipeline returned empty response.")
-                                    except Exception as ex:
-                                        logging.error(f"[Workshop Worker] Pipeline exception: {ex}", exc_info=True)
 
-                            threading.Thread(target=_run_workshop, daemon=True).start()
-
-                else:
-                    # --- 3. STANDARD HOURLY / BRIEFING SCHEDULE OUTSIDE TESTING WINDOW ---
-                    pulse_key = f"{date_str}_{current_hour}"
-                    if getattr(self, "_last_pulse_key", None) != pulse_key:
-                        self._last_pulse_key = pulse_key
-
-                        if current_hour in briefing_hours:
-                            briefing_type = briefing_hours[current_hour]
-                            logging.info(f"[Briefing Engine] Evaluating {briefing_type} for hour block: {current_hour}:00")
-                            # (Briefing execution logic...)
-
-                        elif current_hour in {12, 20}:
-                            logging.info(f"[Autonomous Workshop] Triggering standard background grind for hour block: {current_hour}:00")
-                            # (Standard workshop execution logic...)
+                                threading.Thread(target=_run_workshop, daemon=True).start()
 
             except Exception as e:
                 logging.error(f"[Proactive Daemon] Error in scheduler loop: {e}", exc_info=True)

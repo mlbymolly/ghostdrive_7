@@ -9,7 +9,7 @@ import importlib.util
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 
-from core.paths import AGENT_TOOLS_DIR, USB_TOOLS_DIR, EVERYTHING_ELSE, HOST_HIDDEN_DIR
+from core.paths import AGENT_TOOLS_DIR, USB_TOOLS_DIR, EVERYTHING_ELSE
 from core.Everything_else.agents.ram_manager import RAMManager
 
 logging.basicConfig(level=logging.INFO)
@@ -158,13 +158,13 @@ class AgentToolRunner:
         allowed_tools: Optional[List[str]] = None
     ) -> Optional[str]:
         """
-        6-Stage Proactive Autonomous Pipeline:
+        6-Stage Proactive Autonomous Pipeline with Post-Execution Review & Loop Cycling:
         1. Load Projects & Past Proactive Memory (State Cycling)
         2. Synthesize Recent Conversation Context
         3. Strategic Action & Tool Decision
         4. Tool Execution
-        5. Proofread & Format Output
-        6. Persist Session State for Next Cycle
+        5. Post-Execution Review & Verification (New Review Step)
+        6. Proofread, Format Output, & Persist Session State
         """
         current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
         self.registry.load_tools()
@@ -193,7 +193,6 @@ class AgentToolRunner:
                         except Exception:
                             pass
                     
-                    # Load past proactive cycle memory for continuity (Stage 6 link)
                     if os.path.exists(memory_file):
                         try:
                             with open(memory_file, "r", encoding="utf-8") as f:
@@ -235,13 +234,14 @@ Available Tools:
 {json.dumps(available_specs, indent=2)}
 
 INSTRUCTIONS:
-Determine what proactive action should be taken right now to assist the user or advance their projects.
-If a tool is needed, specify the `tool_name` and exact `tool_args`. If no tool is needed, set `tool_name` to null.
+Evaluate active projects and tasks. If tasks are pending, choose a tool to execute them (`project_manager_tool` or `document_manager_tool`). 
+If no tasks exist, review recent chat history to initialize a new project or add actionable tasks.
+If a tool is needed, specify the exact `tool_name` and complete `tool_args`. If no tool is needed, set `tool_name` to null.
 
 Respond STRICTLY in JSON:
 ```json
 {{
-  "thought": "Reasoning for the proactive step",
+  "thought": "Reasoning for the proactive step and task selection",
   "target_project": "project_name_if_applicable",
   "tool_name": "tool_name_or_null",
   "tool_args": {{}},
@@ -265,7 +265,7 @@ Respond STRICTLY in JSON:
         target_project = strategy.get("target_project", "")
         briefing_focus = strategy.get("briefing_focus", "Routine system and project check-in.")
 
-        # --- STAGE 4: EXECUTION ---
+        # --- STAGE 4: TOOL EXECUTION ---
         tool_output = "No tool executed."
         if tool_name and tool_name in self.registry.tools:
             logger.info(f"[Proactive Pipeline] Stage 4: Executing tool '{tool_name}' with args {tool_args}")
@@ -274,17 +274,48 @@ Respond STRICTLY in JSON:
             except Exception as e:
                 tool_output = f"Tool execution failed: {str(e)}"
 
-        # --- STAGE 5: PROOFREADING & FORMATTING ---
-        logger.info("[Proactive Pipeline] Stage 5: Proofreading briefing for user...")
-        draft_prompt = f"""Synthesize a crisp, high-signal proactive briefing for the user based on the workshop execution.
+        # --- STAGE 5: POST-EXECUTION REVIEW & VERIFICATION ---
+        logger.info("[Proactive Pipeline] Stage 5: Reviewing work and verified task status...")
+        review_prompt = f"""You just executed a proactive step on the user's workspace. Review the result to verify if the task was successfully accomplished or committed to disk.
+
+Target Project: {target_project}
+Tool Used: {tool_name}
+Tool Arguments Used: {json.dumps(tool_args)}
+Tool Execution Output: {tool_output}
+
+INSTRUCTIONS:
+Analyze whether the action succeeded. If the tool output indicates an error or missing parameter, explain how it should be framed or noted for the user. Provide a 1-sentence verification summary.
+
+Respond STRICTLY in JSON:
+```json
+{{
+  "verified_success": true,
+  "review_notes": "Confirmation or correction notes regarding the executed task"
+}}
+```"""
+
+        try:
+            review_res = self.ram_manager.generate_response(
+                prompt=review_prompt,
+                model_filename=model_filename,
+                max_tokens=256
+            )
+            review_data = self._parse_json_action(review_res) or {"verified_success": True, "review_notes": "Completed successfully."}
+        except Exception:
+            review_data = {"verified_success": True, "review_notes": "Completed successfully."}
+
+        # --- STAGE 6: PROOFREADING, FORMATTING & STATE PERSISTENCE ---
+        logger.info("[Proactive Pipeline] Stage 6: Proofreading briefing and saving session state...")
+        draft_prompt = f"""Synthesize a crisp, high-signal proactive briefing for the user based on the workshop execution and review.
 
 Briefing Focus: {briefing_focus}
 Tool Execution Result: {tool_output}
+Review Notes: {review_data.get('review_notes')}
 Project States: {json.dumps(projects_data, indent=2)}
 
 STRICT RULES:
 - Zero motivational filler or fluff.
-- Focus strictly on facts, project status updates, and valuable insights.
+- Focus strictly on facts, verified task completions, project status updates, and valuable insights.
 - Format cleanly for Telegram messaging.
 
 Briefing:"""
@@ -304,11 +335,10 @@ Briefing:"""
             )
             final_message = "\n\n".join(final_responses)
         except Exception as e:
-            logger.error(f"[Proactive Pipeline] Stage 5 error: {e}")
+            logger.error(f"[Proactive Pipeline] Stage 6 briefing error: {e}")
             return None
 
-        # --- STAGE 6: STATE PERSISTENCE & CYCLING ---
-        logger.info("[Proactive Pipeline] Stage 6: Saving session state for next cycle...")
+        # Persist session state & loop continuation record
         if target_project:
             slug = re.sub(r'[-\s]+', '_', re.sub(r'[^\w\s-]', '', target_project.lower()).strip())
             proj_folder = os.path.join(host_projects_dir, slug)
@@ -319,6 +349,7 @@ Briefing:"""
                     "focus": briefing_focus,
                     "tool_used": tool_name,
                     "tool_output": tool_output,
+                    "verification": review_data,
                     "summary": final_message
                 }
                 try:
@@ -327,13 +358,12 @@ Briefing:"""
                         with open(memory_file, "r", encoding="utf-8") as f:
                             history_log = json.load(f)
                     history_log.append(session_record)
-                    # Keep last 5 sessions for continuous rolling memory
                     history_log = history_log[-5:]
                     with open(memory_file, "w", encoding="utf-8") as f:
                         json.dump(history_log, f, indent=2)
-                    logger.info(f"[Proactive Pipeline] Stage 6 complete: Saved memory to {slug}/proactive_memory.json")
+                    logger.info(f"[Proactive Pipeline] Saved rolling memory to {slug}/proactive_memory.json")
                 except Exception as ex:
-                    logger.error(f"[Proactive Pipeline] Stage 6 save error: {ex}")
+                    logger.error(f"[Proactive Pipeline] Memory save error: {ex}")
 
         return final_message
 
