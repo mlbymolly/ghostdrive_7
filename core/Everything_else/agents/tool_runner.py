@@ -99,9 +99,10 @@ class AgentToolRunner:
         model_filename: Optional[str] = None, 
         system_prompt: str = "", 
         user_history: Optional[List[str]] = None,
-        allowed_tools: Optional[List[str]] = None
+        allowed_tools: Optional[List[str]] = None,
+        user_profile: Optional[Dict[str, Any]] = None
     ) -> Union[str, List[str]]:
-        """Algorithm 1: Reactive algorithm for handling user prompts."""
+        """Algorithm 1: Profile-aware reactive algorithm for handling user prompts."""
         current_time_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         self.registry.load_tools()
@@ -113,12 +114,14 @@ class AgentToolRunner:
 
         deterministic_tools = self._smart_tool_fallback(prompt, active_tools)
 
+        # Stage 1: Intent & Tool Classification (Informed by Operator Profile)
         stage1_meta = self._stage_1_intent_and_tool_classification(
             prompt=prompt, 
             model_filename=model_filename, 
             current_time_str=current_time_str, 
             user_history=user_history, 
-            active_tools=active_tools
+            active_tools=active_tools,
+            user_profile=user_profile
         )
     
         model_tools = stage1_meta.get("tools", [])
@@ -135,20 +138,25 @@ class AgentToolRunner:
 
         if needs_tools and valid_tools:
             logger.info(f"[Agent] Stage 2: Executing Multi-Tool Workflow -> {valid_tools}")
-            draft_response = self._stage_2_tool_workflow(prompt, valid_tools, intent, model_filename, current_time_str, user_history)
+            draft_response = self._stage_2_tool_workflow(prompt, valid_tools, intent, model_filename, current_time_str, user_history, system_prompt, user_profile)
             return [self._clean_response_string(draft_response)]
         else:
             logger.info("[Agent] Stage 2: Executing Direct Response Branch")
-            draft_response = self._stage_2_direct_response_workflow(prompt, intent, system_prompt, model_filename, current_time_str, user_history)
+            draft_response = self._stage_2_direct_response_workflow(prompt, intent, system_prompt, model_filename, current_time_str, user_history, user_profile)
 
         logger.info("[Agent] Stage 3: Proofreading and Partitioning Output...")
-        final_responses = self._stage_3_proofread_and_split(prompt, draft_response, system_prompt, model_filename)
+        final_responses = self._stage_3_proofread_and_split(prompt, draft_response, system_prompt, model_filename, user_profile)
 
         return final_responses
 
-
-
-
+    def _format_user_profile(self, user_profile: Optional[Dict[str, Any]]) -> str:
+        if not user_profile:
+            return ""
+        lines = ["Operator Profile Context:"]
+        for k, v in user_profile.items():
+            if v and str(v).strip():
+                lines.append(f"- {k.replace('_', ' ').title()}: {v}")
+        return "\n".join(lines) + "\n\n"
 
     def _stage_1_intent_and_tool_classification(
         self,
@@ -156,19 +164,21 @@ class AgentToolRunner:
         model_filename: Optional[str],
         current_time_str: str,
         user_history: Optional[List[str]],
-        active_tools: List[str]
+        active_tools: List[str],
+        user_profile: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Evaluates incoming user prompts for standard reactive handling."""
+        """Evaluates incoming user prompts with awareness of the operator profile."""
         available_specs = [
             t for t in self.registry.get_tool_summaries()
             if t["name"] in active_tools
         ]
         history_str = self._format_user_history(user_history)
+        profile_str = self._format_user_profile(user_profile)
 
-        eval_prompt = f"""You are an Intent Analysis Engine. Analyze the user's request and determine if external tools are required.
+        eval_prompt = f"""You are an Intent Analysis Engine. Analyze the user's request, considering the operator's context, and determine if external tools are required.
 Current Date: {current_time_str}
 
-{history_str}Available Tools:
+{profile_str}{history_str}Available Tools:
 {json.dumps(available_specs, indent=2)}
 
 User Request: "{prompt}"
@@ -208,7 +218,9 @@ Output STRICTLY JSON:
         intent: str, 
         model_filename: Optional[str], 
         current_time_str: str,
-        user_history: Optional[List[str]] = None
+        user_history: Optional[List[str]] = None,
+        system_prompt: str = "",
+        user_profile: Optional[Dict[str, Any]] = None
     ) -> str:
         aggregated_outputs = []
         history_str = self._format_user_history(user_history)
@@ -218,6 +230,7 @@ Output STRICTLY JSON:
                 continue
             tool_spec = self.registry.tools[tool_name]["spec"]
             
+            # Keep intermediate parameter extraction clean and mechanical
             param_prompt = f"""You are a Tool Parameter Extractor for `{tool_name}`.
 Current Date: {current_time_str}
 
@@ -280,7 +293,13 @@ Output STRICTLY JSON:
             if clean_u not in extracted_urls and not clean_u.endswith(("N/A", "N/A/")):
                 extracted_urls.append(clean_u)
 
-        synthesis_prompt = f"""Synthesize a complete and helpful response based strictly on the tool execution outputs.
+        persona_directives = system_prompt if system_prompt and system_prompt.strip() else "You are a helpful AI assistant."
+        profile_str = self._format_user_profile(user_profile)
+
+        synthesis_prompt = f"""System Persona & Directives:
+{persona_directives}
+
+{profile_str}Synthesize a complete and helpful response based strictly on the tool execution outputs, tailored to the operator's profile and directives.
 CRITICAL INSTRUCTIONS:
 - Do NOT include inline URLs inside your core narrative text.
 - Rely on the facts present in the Tool Outputs.
@@ -316,14 +335,17 @@ Synthesis Response:"""
         system_prompt: str, 
         model_filename: Optional[str], 
         current_time_str: str,
-        user_history: Optional[List[str]] = None
+        user_history: Optional[List[str]] = None,
+        user_profile: Optional[Dict[str, Any]] = None
     ) -> str:
         history_str = self._format_user_history(user_history)
+        persona_directives = system_prompt if system_prompt and system_prompt.strip() else "You are a helpful AI assistant."
+        profile_str = self._format_user_profile(user_profile)
 
         direct_prompt = f"""System Persona & Directives:
-{system_prompt if system_prompt else "You are a helpful AI assistant."}
+{persona_directives}
 
-Today's Date: {current_time_str}
+{profile_str}Today's Date: {current_time_str}
 Intent: {intent}
 
 {history_str}Task / Request: {prompt}
@@ -355,7 +377,8 @@ Response:"""
         prompt: str, 
         draft_response: str, 
         system_prompt: str, 
-        model_filename: Optional[str]
+        model_filename: Optional[str],
+        user_profile: Optional[Dict[str, Any]] = None
     ) -> List[str]:
         if draft_response.startswith("{") and draft_response.endswith("}"):
             parsed = self._parse_json_action(draft_response)
@@ -363,11 +386,12 @@ Response:"""
                 draft_response = self._extract_text_from_dict(parsed)
 
         persona_directives = system_prompt if system_prompt and system_prompt.strip() else "You are a helpful AI assistant."
+        profile_str = self._format_user_profile(user_profile)
 
         proofread_prompt = f"""System Persona & Directives:
 {persona_directives}
 
-Format the draft into clean plain text for messaging while adhering strictly to the System Persona & Directives.
+{profile_str}Format the draft into clean plain text for messaging while adhering strictly to the System Persona & Directives and Operator Profile context.
 
 STRICT RULES:
 1. Maintain the specified persona, tone, vocabulary, and response style.

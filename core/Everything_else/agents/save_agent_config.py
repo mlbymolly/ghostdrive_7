@@ -10,7 +10,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 # Resolve paths dynamically from paths.py
-from paths import USB_FLEET_DIR
+from paths import USB_FLEET_DIR, USER_DATA
 
 DEFAULT_USB_FLEET_DIR = Path(USB_FLEET_DIR)
 
@@ -18,6 +18,25 @@ DEFAULT_USB_FLEET_DIR = Path(USB_FLEET_DIR)
 def generate_encryption_key() -> bytes:
     """Generates a new Fernet key for agent payload encryption."""
     return Fernet.generate_key()
+
+
+def load_user_profile_heuristics(username: str, fernet: Fernet) -> dict:
+    """
+    Safely decrypts and loads the operator profile heuristics in-memory 
+    from the encrypted profile file. No plain text touches the disk.
+    """
+    profile_path = Path(USER_DATA) / f"{username}_profile.enc"
+    if not profile_path.exists():
+        return {}
+    try:
+        with open(profile_path, "rb") as f:
+            encrypted_data = f.read()
+            decrypted_bytes = fernet.decrypt(encrypted_data)
+            profile_data = json.loads(decrypted_bytes.decode("utf-8"))
+            return profile_data.get("heuristics", {})
+    except Exception as e:
+        print(f"[WARNING] Failed to load user profile heuristics for {username}: {e}")
+        return {}
 
 
 def save_agent_config(
@@ -62,14 +81,15 @@ def save_agent_config(
         return else_file_path, None
 
 
-
 def build_agent_payload(
     agent_name: str,
     model_path: str,
     system_prompt: str = "",
     telegram_token: str = "",
     scheduled_ping: dict | None = None,
-    user_profile: dict | None = None,  # <--- ADDED PARAMETER
+    user_profile: dict | None = None,
+    username: str | None = None,       # <--- Added parameter for auto-lookup
+    fernet: Fernet | None = None,      # <--- Added parameter for decryption key
     allowed_tools: list[str] | None = None,
     mail_user: str | None = None,
     mail_pass: str | None = None,
@@ -84,9 +104,13 @@ def build_agent_payload(
         raise FileNotFoundError(f"Model file path not found: '{cleaned_model_path}'")
 
     model_filename_only = os.path.basename(cleaned_model_path)
-
     agent_id = str(uuid.uuid4())[:8]
     env_secrets = {}
+
+    # --- RESOLVE USER PROFILE IN-MEMORY ---
+    resolved_profile = user_profile or {}
+    if not resolved_profile and username and fernet:
+        resolved_profile = load_user_profile_heuristics(username, fernet)
 
     # --- AUTO-DISCOVER ALL TOOLS IF NONE SPECIFIED ---
     tools_list = allowed_tools or []
@@ -113,39 +137,10 @@ def build_agent_payload(
         "telegram_bot_token": telegram_token.strip(),
         "model_path": model_filename_only,
         "scheduled_ping": scheduled_ping or {},
-        "user_profile": user_profile or {},  # <--- SAVED IN ENCRYPTED PAYLOAD
+        "user_profile": resolved_profile,  # <--- Automatically embedded and encrypted
         "allowed_tools": tools_list,
         "env_secrets": env_secrets
     }
 
     enc_path, key_path = save_agent_config(config_data, target_dir=target_dir, encrypt=True)
     return config_data, enc_path, key_path
-
-if __name__ == "__main__":
-    try:
-        print("[+] Testing standalone save_agent_config.py...")
-        dummy_model = "test_model.gguf"
-        
-        with open(dummy_model, "w") as f:
-            f.write("dummy model content")
-
-        cfg, enc_file, key_file = build_agent_payload(
-            agent_name="Test-Fleet-Agent",
-            model_path=dummy_model,
-            system_prompt="You are a deployment test agent.",
-            allowed_tools=["mail_tool"],
-            mail_user="agent@test.com",
-            mail_pass="secret123",
-            mail_server="imap.test.com"
-        )
-
-        print(f"[✓] Agent '{cfg['agent_name']}' created successfully.")
-        print(f"    - Encrypted Config: {enc_file}")
-        print(f"    - Key File:         {key_file}")
-
-        if os.path.exists(dummy_model):
-            os.remove(dummy_model)
-
-    except Exception as err:
-        print(f"[!] Error: {err}", file=sys.stderr)
-        traceback.print_exc()

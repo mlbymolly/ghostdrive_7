@@ -438,13 +438,17 @@ class MultiAgentDaemonHUD(QWidget):
                 system_prompt = agent_config.get("system_prompt", "You are a helpful AI assistant.")
                 model_filename = agent_config.get("model_filename") or agent_config.get("model_path")
                 allowed_tools = agent_config.get("allowed_tools", [])
+                
+                # --- EXTRACT ENCRYPTED PROFILE FROM AGENT CONFIG ---
+                user_profile = agent_config.get("user_profile", {})
 
                 responses = self.tool_runner.process_task(
                     prompt=prompt,
                     model_filename=model_filename,
                     system_prompt=system_prompt,
                     user_history=user_history,
-                    allowed_tools=allowed_tools
+                    allowed_tools=allowed_tools,
+                    user_profile=user_profile  # <--- PASS IT TO THE TOOL RUNNER
                 )
                 self.status_signal.emit("IDLE", "#10B981")
                 return responses
