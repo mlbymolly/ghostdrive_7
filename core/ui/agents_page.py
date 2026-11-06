@@ -488,75 +488,7 @@ class AgentsPage(QWidget):
         cfg_layout.addLayout(grid_cfg)
         layout.addWidget(config_panel)
 
-        # --- SECTION 3: USER QUESTIONNAIRE ---
-        quest_panel = SectionPanel("ABOUT YOU (OPTIONAL)")
-        quest_layout = quest_panel.getContentLayout()
-
-        grid_quest = QGridLayout()
-        grid_quest.setContentsMargins(0, 10, 0, 0)
-        grid_quest.setSpacing(12)
-
-        # Row 0: Preferred Name & Profession
-        lbl_quest_name = QLabel("PREFERRED NAME")
-        lbl_quest_name.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_quest_name, 0, 0)
-
-        lbl_occupation = QLabel("OCCUPATION / ROLE")
-        lbl_occupation.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_occupation, 0, 1)
-
-        self.quest_name = QLineEdit()
-        self.quest_name.setPlaceholderText("e.g. Alex")
-        self.quest_name.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_name, 1, 0)
-
-        self.quest_occupation = QLineEdit()
-        self.quest_occupation.setPlaceholderText("e.g. Software Engineer, Founder, Student")
-        self.quest_occupation.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_occupation, 1, 1)
-
-        # Row 2: Goals & Tech Stack / Environment
-        lbl_goals = QLabel("ACTIVE GOALS")
-        lbl_goals.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_goals, 2, 0)
-
-        lbl_tools = QLabel("DAILY TOOLS & TECH STACK")
-        lbl_tools.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_tools, 2, 1)
-
-        self.quest_goals = QLineEdit()
-        self.quest_goals.setPlaceholderText("e.g. Launching a desktop app, staying organized")
-        self.quest_goals.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_goals, 3, 0)
-
-        self.quest_tools = QLineEdit()
-        self.quest_tools.setPlaceholderText("e.g. Python, macOS, PySide6, Docker")
-        self.quest_tools.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_tools, 3, 1)
-
-        # Row 4: Hobbies & Passions
-        lbl_interests = QLabel("HOBBIES & INTERESTS")
-        lbl_interests.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_interests, 4, 0, 1, 2)
-
-        self.quest_interests = QLineEdit()
-        self.quest_interests.setPlaceholderText("e.g. Baking, retro gaming, basketball, 3D printing")
-        self.quest_interests.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_interests, 5, 0, 1, 2)
-
-        # Row 6: Custom Context
-        lbl_context = QLabel("ADDITIONAL AI NOTES")
-        lbl_context.setStyleSheet(label_style)
-        grid_quest.addWidget(lbl_context, 6, 0, 1, 2)
-
-        self.quest_context = QLineEdit()
-        self.quest_context.setPlaceholderText("e.g. Keep answers concise, skip fluff")
-        self.quest_context.setStyleSheet(STYLE_INPUT)
-        grid_quest.addWidget(self.quest_context, 7, 0, 1, 2)
-
-        quest_layout.addLayout(grid_quest)
-        layout.addWidget(quest_panel)
-
+        
         # --- SAVE BUTTON ---
         self.save_btn = QPushButton("SAVE AGENT TO FLEET")
         self.save_btn.setCursor(Qt.PointingHandCursor)
@@ -585,20 +517,9 @@ class AgentsPage(QWidget):
             self.model_path_input.setText(file_path)
 
 
-    def get_user_profile_from_ui(self) -> dict:
-        """Extracts questionnaire values from UI inputs."""
-        return {
-            "preferred_name": self.quest_name.text().strip(),
-            "occupation": self.quest_occupation.text().strip(),
-            "active_goals": self.quest_goals.text().strip(),
-            "daily_tools": self.quest_tools.text().strip(),
-            "hobbies_interests": self.quest_interests.text().strip(),
-            "additional_notes": self.quest_context.text().strip()
-        }
-
+    
     def save_new_agent(self):
         try:
-            # Automatically include all available tools in the tools directory
             tools_dir = os.path.join(EVERYTHING_ELSE, "agents", "tools")
             enabled_tools = []
             if os.path.exists(tools_dir):
@@ -610,16 +531,15 @@ class AgentsPage(QWidget):
             mail_pass = self.mail_pass_input.text() if hasattr(self, "mail_pass_input") else None
             mail_server = self.mail_provider_select.currentData() if hasattr(self, "mail_provider_select") else None
 
-            # Collect profile inputs from the UI
-            user_profile_data = self.get_user_profile_from_ui()
-
+            # Automatically inject user profile heuristics in-memory using session credentials
             config_data, enc_path, key_path = build_agent_payload(
                 agent_name=self.name_input.text(),
                 model_path=self.model_path_input.text(),
                 system_prompt=self.prompt_input.toPlainText(),
                 telegram_token=self.token_input.text(),
                 scheduled_ping=self.get_schedule_config_from_ui(),
-                user_profile=user_profile_data,  # <--- PASSING PROFILE TO PAYLOAD
+                username=self.username,     
+                fernet=self.fernet,     
                 allowed_tools=enabled_tools,
                 mail_user=mail_user,
                 mail_pass=mail_pass,
@@ -627,19 +547,13 @@ class AgentsPage(QWidget):
                 target_dir=USB_FLEET_DIR
             )
 
-            ghost_alert(self, "SAVED TO FLEET", f"Agent '{config_data['agent_name']}' encrypted (.enc + .key) and saved with user profile.")
+            ghost_alert(self, "SAVED TO FLEET", f"Agent '{config_data['agent_name']}' encrypted (.enc + .key) and saved with user profile heuristics.")
 
-            # Reset UI controls
+            # Reset UI controls (questionnaire clears removed)
             self.name_input.clear()
             self.prompt_input.clear()
             self.token_input.clear()
             self.model_path_input.clear()
-            self.quest_name.clear()
-            self.quest_occupation.clear()
-            self.quest_goals.clear()
-            self.quest_tools.clear()
-            self.quest_interests.clear()
-            self.quest_context.clear()
 
             if hasattr(self, "mail_user_input"):
                 self.mail_user_input.clear()
